@@ -1,0 +1,122 @@
+import serial
+import time
+import csv
+import os
+import Blynklib
+
+# Blynk Configuration
+BLYNK_AUTH = 'X4Q7Y8Q1oqBLtY1Uqe6wltz3b4eTQNuX'  # Replace with your token
+blynk = BlynkLib.Blynk(BLYNK_AUTH)
+
+# Serial connection
+arduino = serial.Serial(port='COM6', baudrate=9600, timeout=1)
+time.sleep(2)
+
+# Thresholds
+UPPER_THRESHOLD = 4  # cm
+LOWER_THRESHOLD = 18  # cm
+TANK_CAPACITY = 560  # Liters per fill
+
+# Variables
+tank_full_no = 0
+current_week = 1
+daily_water_usage = 0
+last_state = "low"
+weekly_average_constant = None  # First week's average
+standby_mode = False  # Tracks if system is paused
+
+# CSV Files
+DAILY_CSV = "daily_water_usage.csv"
+WEEKLY_CSV = "weekly_average_usage.csv"
+
+# Function to save data to CSV
+def save_to_csv(filename, data):
+    file_exists = os.path.exists(filename)
+    with open(filename, mode="a", newline="") as file:
+        writer = csv.writer(file)
+        if not file_exists:
+            writer.writerow(["Date/Week", "Water Usage (Liters)"])  # Add headers if new file
+        writer.writerow(data)
+
+# Function to handle weekly average and standby mode
+def update_weekly_average():
+    global weekly_average_constant, standby_mode
+
+    weekly_avg = daily_water_usage
+    save_to_csv(WEEKLY_CSV, [f"Week {current_week}", weekly_avg])
+
+    if weekly_average_constant is None:
+        weekly_average_constant = weekly_avg  # Set initial constant
+    else:
+        difference = abs(weekly_avg - weekly_average_constant)
+
+        if difference >= 300:
+            alert_msg = "⚠️ Weekly water usage too high! Possible leak!"
+            print("\n" + alert_msg)
+            blynk.virtual_write(3, alert_msg)  # Send alert (V3)
+            blynk.virtual_write(4, "System on standby. Tap to resume.")  # Notify user (V4)
+            standby_mode = True  # Activate standby mode
+        elif difference < 50:  # If change is small, update constant
+            weekly_average_constant = weekly_avg
+        else:
+            weekly_average_constant = (weekly_avg + weekly_average_constant) / 2
+
+    print(f"🔢 Updated Weekly Average Constant: {weekly_average_constant:.1f} liters")
+    blynk.virtual_write(2, weekly_average_constant)  # Update Blynk (V2)
+
+# Blynk Virtual Pin Handler (Button V4 to resume system)
+@blynk.on("V4")  # FIXED: Correct event listener
+def resume_system(value):
+    global standby_mode
+    if value == ['1']:  # Button Pressed
+        standby_mode = False
+        print("\n System resumed after user confirmation.")
+        blynk.virtual_write(3, " Issue fixed! Monitoring resumed.")  # Clear alert
+        blynk.virtual_write(4, "")  # Clear standby message
+
+# Start Monitoring
+start_time = time.time()
+while True:
+    try:
+        blynk.run()  # Keep Blynk connection active
+
+        if standby_mode:
+            continue  # Pause system until resumed
+
+        raw_data = arduino.readline().decode('utf-8', errors='ignore').strip()
+        if raw_data:
+            try:
+                data = int(raw_data)
+                blynk.virtual_write(0, data)  # Send water level to Blynk (V0)
+
+                if data <= UPPER_THRESHOLD and last_state == "low":
+                    tank_full_no += 1
+                    daily_water_usage += TANK_CAPACITY
+                    print("\n The tank is full!")
+                    blynk.virtual_write(1, daily_water_usage)  # Send daily usage (V1)
+                    blynk.virtual_write(3, " Tank is full!")  # Notification (V3)
+                    last_state = "full"
+
+                elif data >= LOWER_THRESHOLD and last_state == "full":
+                    print(" Water level low, refilling tank...")
+                    blynk.virtual_write(3, " Water low, filling...")  # Notification (V3)
+                    last_state = "low"
+
+            except ValueError:
+                print(" Invalid data received, skipping...")  # Handles bad serial data
+
+        # Simulated Week Passes (1 min = 1 week)
+        elapsed_time = time.time() - start_time
+        if elapsed_time >= 60:
+            save_to_csv(DAILY_CSV, [time.strftime("%Y-%m-%d"), daily_water_usage])  # Save daily usage
+            update_weekly_average()  # Process weekly average
+            print(f"\n Week {current_week} over! Avg: {daily_water_usage:.1f} liters")
+            print(" Next Week Started!")
+            current_week += 1
+            daily_water_usage = 0  # Reset for new week
+            start_time = time.time()  # Reset timer
+
+    except KeyboardInterrupt:
+        print("\n Stopping program...")
+        arduino.close()
+        break
