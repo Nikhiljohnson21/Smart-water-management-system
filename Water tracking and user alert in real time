@@ -1,0 +1,106 @@
+import serial
+import time
+import csv
+import os
+from datetime import datetime, timedelta  # Import datetime module
+
+# Serial connection
+arduino = serial.Serial(port='COM6', baudrate=9600, timeout=1)
+time.sleep(2)
+
+# Thresholds
+UPPER_THRESHOLD = 4  # cm
+LOWER_THRESHOLD = 18  # cm
+TANK_CAPACITY = 560  # Liters per fill
+
+# Variables
+tank_full_no = 0
+daily_water_usage = 0  # Stores daily water usage
+last_state = "low"
+weekly_average_constant = None  # Stores the first week's average
+
+# Week tracking
+start_date = datetime.today()  # Stores the date when tracking starts
+current_week = 1
+
+# CSV Files
+DAILY_CSV = "daily_water_usage.csv"
+WEEKLY_CSV = "weekly_average_usage.csv"
+
+# Function to save data to CSV
+def save_to_csv(filename, data):
+    file_exists = os.path.exists(filename)
+    with open(filename, mode="a", newline="") as file:
+        writer = csv.writer(file)
+        if not file_exists:
+            writer.writerow(["Date/Week", "Water Usage (Liters)"])  # Add headers if new file
+        writer.writerow(data)
+
+# Function to calculate weekly average and update constant
+def update_weekly_average():
+    global weekly_average_constant
+
+    weekly_avg = daily_water_usage  # Weekly usage is the total of 7 days
+    save_to_csv(WEEKLY_CSV, [f"Week {current_week}", weekly_avg])  # Store in CSV
+
+    if weekly_average_constant is None:
+        weekly_average_constant = weekly_avg  # Set initial constant
+    else:
+        difference = weekly_avg - weekly_average_constant
+        
+        if difference >= 300:
+            print("\n The weekly water usage has gone above the average. Check for leaks!")
+            while True:
+                response = input("I am on standby mode. Let me know when the problem is fixed (yes/no): ").strip().lower()
+                if response == "yes":
+                    break  # Resume operation when user confirms
+                elif response == "no":
+                    print("Still on standby mode...")
+        elif weekly_avg < weekly_average_constant:
+            print("\n Well done! You have used less water this week.")
+
+        # Update weekly_average_constant to the average of the new and old values
+        weekly_average_constant = (weekly_avg + weekly_average_constant) / 2
+    
+    print(f" Updated Weekly Average Constant: {weekly_average_constant:.1f} liters")  # Show updated value
+
+# Start Monitoring
+while True:
+    try:
+        raw_data = arduino.readline().decode('utf-8', errors='ignore').strip()
+        if raw_data:
+            try:
+                data = int(raw_data)
+
+                if data <= UPPER_THRESHOLD and last_state == "low":
+                    tank_full_no += 1
+                    daily_water_usage += TANK_CAPACITY
+                    print("\n The tank is full!")
+                    print(f" Total water used today: {daily_water_usage} liters")
+                    last_state = "full"
+
+                elif LOWER_THRESHOLD <= data <= 25 and last_state == "full":
+                    print(" Water level low, filling the tank again...")
+                    last_state = "low"
+
+            except ValueError:
+                print(" Invalid data received, skipping...")
+
+        # Check if a full week has passed
+        today = datetime.today()
+        if today >= start_date + timedelta(days=7):  # If today is 7 days after start_date
+            save_to_csv(DAILY_CSV, [today.strftime("%Y-%m-%d"), daily_water_usage])  # Save daily usage
+
+            # Process weekly average
+            update_weekly_average()
+            print(f"\n Week {current_week} over! Weekly average: {daily_water_usage:.1f} liters")
+            print("Next Week Started!")  # Indicate next week
+            current_week += 1
+
+            daily_water_usage = 0  # Reset for new week
+            start_date = today  # Reset start date to the current date
+
+    except KeyboardInterrupt:
+        print("\n Stopping program...")
+        arduino.close()
+        break
